@@ -8,6 +8,7 @@ const THEME_STORE_API_URL = 'https://api.github.com/repos/huilang-me/CFSM-Theme-
 let cachedThemeStore = null
 let cacheTime = 0
 const SAFE_GITHUB_PART = /^[A-Za-z0-9._-]+$/
+const SAFE_GITHUB_BRANCH = /^[A-Za-z0-9._/-]+$/
 
 const createEmptyThemeStore = () => ({ schema: 1, themes: [] })
 
@@ -33,6 +34,43 @@ const fetchThemeStore = async (url, accept = 'application/json') => {
 
   if (!res.ok) throw new Error(`Theme store request failed: ${res.status}`)
   return res.json()
+}
+
+const decodeXml = (value) => String(value || '')
+  .replace(/&lt;/g, '<')
+  .replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"')
+  .replace(/&#39;|&apos;/g, "'")
+  .replace(/&amp;/g, '&')
+
+const parseAtomCommits = (xml, limit) => {
+  const commits = []
+  for (const match of String(xml || '').matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
+    const entry = match[1]
+    const sha = entry.match(/Grit::Commit\/([a-f0-9]{40})<\/id>/i)?.[1] || ''
+    const title = decodeXml(entry.match(/<title>\s*([\s\S]*?)\s*<\/title>/i)?.[1]).trim()
+    const date = entry.match(/<updated>([^<]+)<\/updated>/i)?.[1] || ''
+    if (!sha) continue
+
+    commits.push({
+      sha,
+      commit: {
+        author: { date },
+        committer: { date },
+        message: title
+      }
+    })
+    if (commits.length >= limit) break
+  }
+  return commits
+}
+
+const fetchThemeCommitsFromAtom = async (owner, repo, branch, limit) => {
+  const branchPath = branch.split('/').map(encodeURIComponent).join('/')
+  const atomUrl = `https://github.com/${owner}/${repo}/commits/${branchPath}.atom`
+  const res = await fetch(atomUrl, { headers: { 'User-Agent': 'CFSM-Theme-Store' } })
+  if (!res.ok) throw new Error(`Theme commits feed failed: ${res.status}`)
+  return parseAtomCommits(await res.text(), limit)
 }
 
 export async function handleTheme() {
@@ -63,8 +101,8 @@ export async function handleThemeVersions(owner, repo, branch, limit = 20) {
     !SAFE_GITHUB_PART.test(owner || '') ||
     !SAFE_GITHUB_PART.test(repo || '') ||
     typeof branch !== 'string' ||
-    !branch.trim() ||
-    /[\0\r\n]/.test(branch)
+    !SAFE_GITHUB_BRANCH.test(branch.trim()) ||
+    branch.split('/').some(part => !part || part === '.' || part === '..')
   ) {
     return { ok: false, status: 400, error: 'invalidThemeRepository' }
   }
@@ -75,7 +113,12 @@ export async function handleThemeVersions(owner, repo, branch, limit = 20) {
   apiUrl.searchParams.set('per_page', String(perPage))
 
   try {
-    const commits = await fetchThemeStore(apiUrl.href)
+    let commits
+    try {
+      commits = await fetchThemeStore(apiUrl.href)
+    } catch (_) {
+      commits = await fetchThemeCommitsFromAtom(owner, repo, branch.trim(), perPage)
+    }
     if (!Array.isArray(commits)) throw new Error('Invalid GitHub response')
     return { ok: true, commits }
   } catch (_) {

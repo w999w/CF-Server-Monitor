@@ -287,8 +287,10 @@ const fetchThemeStoreFromRaw = async () => {
 }
 
 const fetchThemeStore = async () => {
-  const result = await http.get('/theme')
-  if (!result.error) return normalizeThemeStore(result.data)
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const result = await http.get('/theme')
+    if (!result.error) return normalizeThemeStore(result.data)
+  }
 
   return fetchThemeStoreFromRaw()
 }

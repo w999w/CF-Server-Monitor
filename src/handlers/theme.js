@@ -7,6 +7,7 @@ const THEME_STORE_API_URL = 'https://api.github.com/repos/huilang-me/CFSM-Theme-
 
 let cachedThemeStore = null
 let cacheTime = 0
+const SAFE_GITHUB_PART = /^[A-Za-z0-9._-]+$/
 
 const createEmptyThemeStore = () => ({ schema: 1, themes: [] })
 
@@ -54,5 +55,30 @@ export async function handleTheme() {
     return { ok: true, themeStore, cached: false }
   } catch (e) {
     return { ok: false, status: 0, error: 'themeStoreProxyFailed' }
+  }
+}
+
+export async function handleThemeVersions(owner, repo, branch, limit = 20) {
+  if (
+    !SAFE_GITHUB_PART.test(owner || '') ||
+    !SAFE_GITHUB_PART.test(repo || '') ||
+    typeof branch !== 'string' ||
+    !branch.trim() ||
+    /[\0\r\n]/.test(branch)
+  ) {
+    return { ok: false, status: 400, error: 'invalidThemeRepository' }
+  }
+
+  const perPage = Math.min(Math.max(Number(limit) || 20, 1), 30)
+  const apiUrl = new URL(`https://api.github.com/repos/${owner}/${repo}/commits`)
+  apiUrl.searchParams.set('sha', branch.trim())
+  apiUrl.searchParams.set('per_page', String(perPage))
+
+  try {
+    const commits = await fetchThemeStore(apiUrl.href)
+    if (!Array.isArray(commits)) throw new Error('Invalid GitHub response')
+    return { ok: true, commits }
+  } catch (_) {
+    return { ok: false, status: 502, error: 'themeVersionsProxyFailed' }
   }
 }

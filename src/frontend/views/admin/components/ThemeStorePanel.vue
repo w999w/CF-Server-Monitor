@@ -186,7 +186,6 @@ const emit = defineEmits(['theme-applied', 'theme-options-applied', 'alert-messa
 const THEME_STORE_URL = 'https://raw.githubusercontent.com/huilang-me/CFSM-Theme-Store/refs/heads/main/themes.json'
 const THEME_STORE_FETCH_TIMEOUT_MS = 8000
 const COMMIT_LIMIT = 10
-const GITHUB_FETCH_TIMEOUT_MS = 8000
 const SAFE_GITHUB_PART = /^[A-Za-z0-9._-]+$/
 
 const themes = ref([])
@@ -444,27 +443,21 @@ const fetchThemeCommitVersions = async (theme) => {
   if (!source) return { versions: [], failed: false }
 
   try {
-    const apiUrl = new URL(`https://api.github.com/repos/${source.owner}/${source.repo}/commits`)
-    apiUrl.searchParams.set('sha', source.branch)
-    apiUrl.searchParams.set('per_page', String(COMMIT_LIMIT))
+    const params = new URLSearchParams({
+      owner: source.owner,
+      repo: source.repo,
+      branch: source.branch,
+      limit: String(COMMIT_LIMIT)
+    })
+    const result = await http.get(`/theme/versions?${params}`)
+    const commits = result.data
+    if (result.error || !Array.isArray(commits)) return { versions: [], failed: true }
 
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), GITHUB_FETCH_TIMEOUT_MS)
-    try {
-      const res = await fetch(apiUrl.href, { signal: controller.signal })
-      if (!res.ok) return { versions: [], failed: true }
+    const versions = commits
+      .map(commit => buildCommitVersion(source.repoUrl, commit))
+      .filter(Boolean)
 
-      const commits = await res.json()
-      if (!Array.isArray(commits)) return { versions: [], failed: true }
-
-      const versions = commits
-        .map(commit => buildCommitVersion(source.repoUrl, commit))
-        .filter(Boolean)
-
-      return { versions, failed: versions.length === 0 }
-    } finally {
-      clearTimeout(timeout)
-    }
+    return { versions, failed: versions.length === 0 }
   } catch (_) {
     return { versions: [], failed: true }
   }

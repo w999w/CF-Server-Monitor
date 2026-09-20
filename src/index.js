@@ -5,7 +5,7 @@ import { handleAdminAPI } from './handlers/admin.js';
 import { serveFrontend } from './handlers/frontend.js';
 import { handleUpdate, handleWebSocketUpgrade, handleUpdateWebSocketUpgrade } from './handlers/update.js';
 import { handleServerAPI, handleServersAPI } from './handlers/dashboard.js';
-import { handleTheme } from './handlers/theme.js';
+import { handleTheme, handleThemeVersions } from './handlers/theme.js';
 import { isValidThemeOptions, loadSettings, loadSiteSettings, loadAppearanceOptions, normalizeFrontendWsTimeoutMinutes, normalizeLongHistoryPoints, saveThemeOptions, setDebug, debug } from './utils/settings.js';
 import { omitNullLossProbeFields } from './handlers/dashboard.js';
 import { checkAuth, simpleAuthResponse } from './middleware/auth.js';
@@ -353,6 +353,18 @@ export default {
         return createSuccessResponse(themeResult.themeStore, {
           'X-CFSM-Theme-Source': themeResult.cached ? 'cache' : 'raw'
         })
+      }},
+      { method: 'GET', path: '/theme/versions', handler: async () => {
+        const themeResult = await handleThemeVersions(
+          url.searchParams.get('owner'),
+          url.searchParams.get('repo'),
+          url.searchParams.get('branch'),
+          url.searchParams.get('limit')
+        )
+        if (!themeResult.ok) {
+          return createErrorResponse(new AppError(themeResult.error, themeResult.status), false)
+        }
+        return createSuccessResponse(themeResult.commits)
       }},
       { method: 'POST', path: '/api/theme_options', handler: async () => {
         await ensureSiteSettings();

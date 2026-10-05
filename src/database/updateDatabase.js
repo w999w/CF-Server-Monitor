@@ -1,4 +1,4 @@
-import { debug, getSettingByKey } from '../utils/settings.js';
+import { debug } from '../utils/settings.js';
 import {
   detectBillingCycle,
   detectCurrencySymbol,
@@ -8,40 +8,12 @@ import {
 } from '../utils/serverBilling.js';
 import { HISTORY_UPGRADE_COLUMNS } from '../utils/historyFields.js';
 
-export async function ensureNotificationDeliveryTable(db) {
-  await db.prepare(`
-    CREATE TABLE IF NOT EXISTS notification_deliveries (
-      business_key TEXT PRIMARY KEY,
-      type TEXT NOT NULL,
-      period TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'pending',
-      created_at INTEGER NOT NULL,
-      failed_at INTEGER DEFAULT NULL,
-      sent_at INTEGER DEFAULT NULL,
-      last_error TEXT DEFAULT '',
-      attempt_count INTEGER NOT NULL DEFAULT 0,
-      next_attempt_at INTEGER NOT NULL DEFAULT 0,
-      lease_until INTEGER NOT NULL DEFAULT 0,
-      expires_at INTEGER NOT NULL
-    )
-  `).run();
-  await db.prepare(`
-    CREATE INDEX IF NOT EXISTS idx_notification_deliveries_status
-    ON notification_deliveries(status, created_at)
-  `).run();
-  return { success: true };
-}
-
 
 export async function updateDatabase(db) {
   debug('开始执行数据库更新...');
   const results = [];
   
   try {
-    const historyIndex = await ensureHistoryIndex(db);
-    results.push({ name: 'metrics_history 索引检查', ...historyIndex });
-    
     const serversCols = await addServerColumns(db);
     results.push({ name: 'servers 表列更新', ...serversCols });
     
@@ -51,9 +23,6 @@ export async function updateDatabase(db) {
     const historyCols = await addHistoryColumns(db);
     results.push({ name: 'metrics_history 表列更新', ...historyCols });
 
-    const notificationDeliveries = await ensureNotificationDeliveryTable(db);
-    results.push({ name: 'notification_deliveries 表检查', ...notificationDeliveries });
-
     // 无需清理metrics_history多余字段，消耗过大，不影响使用，每周执行weeklyCleanup的时候会自动清理
     
     const staleCleanup = await cleanupStaleSettings(db);
@@ -61,6 +30,9 @@ export async function updateDatabase(db) {
     
     const dropAggregated = await dropMetricsAggregatedTable(db);
     results.push({ name: '删除弃用的 metrics_aggregated 表', ...dropAggregated });
+    
+    // 删除弃用的 notification_deliveries 表
+    await db.prepare(`DROP TABLE IF EXISTS notification_deliveries`).run();
     
     debug('✅ 数据库更新完成');
     
@@ -77,69 +49,6 @@ export async function updateDatabase(db) {
       error: e.message,
       results
     };
-  }
-}
-
-export async function isHistoryOptimized(db) {
-  const history_id_optimized = await getSettingByKey(db, 'history_id_optimized', true);
-  if(history_id_optimized) return true;
-  const minId = await db.prepare(`
-    SELECT id AS min_id
-    FROM metrics_history
-    ORDER BY id ASC
-    LIMIT 1
-  `).first();
-  if(!minId) return true;  // 空表，视为已优化
-  return minId.min_id > 10000000000000;
-}
-
-// 确保 旧版metrics_history 表有索引
-export async function ensureHistoryIndex(db) {
-  const history_id_optimized = await getSettingByKey(db, 'history_id_optimized', true);
-  if(history_id_optimized) {
-    debug('metrics_history 表已优化，无需创建索引');
-    return { success: true, created: false, message: 'metrics_history 表已优化，无需创建索引'};
-  }
-  
-  try {
-    const index = await db.prepare(
-      `SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='metrics_history'`
-    ).first();
-
-    if (index) {
-      debug('索引已存在无需创建');
-      return { success: true, created: false, message: '索引已存在' };
-    }
-
-    // 获取最小id
-     const minId = await db.prepare(`
-      SELECT id AS min_id
-      FROM metrics_history
-      ORDER BY id ASC
-      LIMIT 1
-    `).first();
-
-    if (!minId || minId.min_id > 10000000000000) {
-      debug('metrics_history 表为空或已优化，无需创建索引');
-      return {
-        success: true,
-        created: false,
-        message: 'metrics_history 表为空或已优化，无需创建索引'
-      };
-    }
-
-    const idxName = 'idx_history_server_time_' + Math.random().toString(36).substring(2);
-    await db.prepare(`DROP INDEX IF EXISTS ${idxName}`).run();
-    await db.prepare(`
-      CREATE INDEX IF NOT EXISTS ${idxName} 
-      ON metrics_history(server_id, timestamp)
-    `).run();
-    debug(`✅ 已创建索引 ${idxName}`);
-
-    return { success: true, created: true, message: '已创建索引' };
-  } catch (e) {
-    debug('检查/创建 metrics_history 索引失败:', e);
-    return { success: false, error: e.message };
   }
 }
 
@@ -177,7 +86,8 @@ export async function addServerColumns(db) {
       rx_correction: "REAL DEFAULT NULL",
       tx_correction: "REAL DEFAULT NULL",
       traffic_calc_type: "TEXT DEFAULT 'total'",
-      traffic_snapshots: "TEXT DEFAULT '{}'",
+      traffic_alert_percent: "INTEGER DEFAULT NULL",
+      traffic_alert_state: "TEXT",
       interface: "TEXT DEFAULT ''",
       history_partition_id: "INTEGER DEFAULT 0",
       timestamp: "INTEGER DEFAULT 0"
@@ -222,7 +132,7 @@ async function cleanupServerExtraColumns(db) {
     const { results: columns } = await db.prepare(`PRAGMA table_info(servers)`).all();
     const existingCols = columns.map(c => c.name);
     
-    const extraCols = ['cpu', 'ram', 'disk', 'load_avg', 'uptime', 'last_updated', 'ram_total', 'net_rx', 'net_tx', 'net_in_speed', 'net_out_speed', 'os', 'cpu_info', 'cpu_cores' , 'arch' ,'boot_time', 'ram_used', 'swap_total', 'swap_used', 'disk_total', 'disk_used', 'processes', 'tcp_conn', 'udp_conn', 'country', 'ip_v4', 'ip_v6', 'ping_ct', 'ping_cu', 'ping_cm', 'ping_bd', 'monthly_rx', 'monthly_tx', 'last_rx', 'last_tx', 'reset_month', 'bandwidth'];
+    const extraCols = ['cpu', 'ram', 'disk', 'load_avg', 'uptime', 'last_updated', 'ram_total', 'net_rx', 'net_tx', 'net_in_speed', 'net_out_speed', 'os', 'cpu_info', 'cpu_cores' , 'arch' ,'boot_time', 'ram_used', 'swap_total', 'swap_used', 'disk_total', 'disk_used', 'processes', 'tcp_conn', 'udp_conn', 'country', 'ip_v4', 'ip_v6', 'ping_ct', 'ping_cu', 'ping_cm', 'ping_bd', 'monthly_rx', 'monthly_tx', 'last_rx', 'last_tx', 'reset_month', 'bandwidth','traffic_snapshots'];
     const colsToDrop = extraCols.filter(col => existingCols.includes(col));
     
     if (colsToDrop.length === 0) {
@@ -320,8 +230,12 @@ export async function cleanupStaleSettings(db) {
       'tg_bot_token',
       'tg_chat_id',
       'last_aggregated_to',
+      'history_id_optimized',
       'last_cleanup',
-      'expire_reminder'
+      'expire_reminder',
+      'traffic_report_last_daily',
+      'traffic_report_last_weekly',
+      'traffic_report_last_monthly'
     ];
     const staleKeysWhere = stalePrefixes.map(() => `key LIKE ?`).concat(staleExact.map(() => `key = ?`)).join(' OR ');
     const staleBindings = [...stalePrefixes, ...staleExact];
